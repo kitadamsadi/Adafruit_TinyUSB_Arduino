@@ -313,6 +313,19 @@ void dcd_sof_enable(uint8_t rhport, bool en)
   // TODO implement later
 }
 
+//ADI: Support hooking the SOF event with low latency
+typedef void (* sof_irq_hook_t)(uint16_t);
+
+sof_irq_hook_t gSOF_ISR_HookPtr = NULL;
+
+sof_irq_hook_t setSOFIRQHook(sof_irq_hook_t hookFunc)
+{
+sof_irq_hook_t old = gSOF_ISR_HookPtr;
+gSOF_ISR_HookPtr = hookFunc;
+return old;
+}
+
+
 //--------------------------------------------------------------------+
 // Endpoint API
 //--------------------------------------------------------------------+
@@ -329,15 +342,15 @@ bool dcd_edpt_open (uint8_t rhport, tusb_desc_endpoint_t const * desc_edpt)
   if (desc_edpt->bmAttributes.xfer != TUSB_XFER_ISOCHRONOUS)
   {
     if (dir == TUSB_DIR_OUT)
-    {
-      NRF_USBD->INTENSET = TU_BIT(USBD_INTEN_ENDEPOUT0_Pos + epnum);
+    {                                                                //ADI
+      NRF_USBD->INTENSET = TU_BIT(USBD_INTEN_ENDEPOUT0_Pos + epnum) | (gSOF_ISR_HookPtr?USBD_INTENSET_SOF_Msk:0);
       NRF_USBD->EPOUTEN |= TU_BIT(epnum);
 
       // Write any value to SIZE register will allow nRF to ACK/accept data
       NRF_USBD->SIZE.EPOUT[epnum] = 0;
     }else
-    {
-      NRF_USBD->INTENSET = TU_BIT(USBD_INTEN_ENDEPIN0_Pos + epnum);
+    {                                                                //ADI
+      NRF_USBD->INTENSET = TU_BIT(USBD_INTEN_ENDEPIN0_Pos + epnum) | (gSOF_ISR_HookPtr?USBD_INTENSET_SOF_Msk:0);
       NRF_USBD->EPINEN  |= TU_BIT(epnum);
     }
   }
@@ -608,6 +621,7 @@ void bus_reset(void)
   _dcd.xfer[0][TUSB_DIR_OUT].mps = MAX_PACKET_SIZE;
 }
 
+
 void dcd_int_handler(uint8_t rhport)
 {
   (void) rhport;
@@ -628,6 +642,14 @@ void dcd_int_handler(uint8_t rhport)
       __ISB(); __DSB();
     }
   }
+
+      //ADI: Support hooking the SOF event with low latency
+   if((int_status & USBD_INTEN_SOF_Msk) && gSOF_ISR_HookPtr)
+   {
+     //(*gSOF_ISR_HookPtr)((uint16_t)nrf_usbd_framecntr_get(NRF_USBD));
+     (*gSOF_ISR_HookPtr)((uint16_t)NRF_USBD->FRAMECNTR);
+   }
+
 
   if ( int_status & USBD_INTEN_USBRESET_Msk )
   {
@@ -670,7 +692,7 @@ void dcd_int_handler(uint8_t rhport)
       }
     }
 
-    if ( !iso_enabled )
+    if ( !iso_enabled && !gSOF_ISR_HookPtr)
     {
       // ISO endpoint is not used, SOF is only enabled one-time for remote wakeup
       // so we disable it now
